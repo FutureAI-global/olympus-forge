@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Append a structured lesson to learnings.jsonl, or increment evidence_count
+if an entry with the same id already exists.
+
+Usage:
+  capture-lesson --skill <name> --pattern <str> --evidence <str> --fix <str>
+                 --severity <P0|P1|P2|P3> --scope <generic|<your-project>|slug>
+                 --tags <comma-list> [--user-quote <str>] [--auto]
+
+Writes to ~/.gstack/projects/${SLUG}/learnings.jsonl where SLUG is derived by
+~/.claude/skills/gstack/bin/gstack-slug (falls back to "unknown").
+"""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def lesson_id(skill: str, pattern: str) -> str:
+    normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", pattern.lower())).strip()
+    h = hashlib.sha256(f"{skill}\n{normalized}".encode()).hexdigest()
+    return f"sha256-{h[:24]}"
+
+
+def resolve_slug() -> str:
+    # Prefer gstack-slug output if available
+    import subprocess
+    try:
+        r = subprocess.run(
+            [os.path.expanduser("~/.claude/skills/gstack/bin/gstack-slug")],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if line.startswith("SLUG="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "unknown"
+
+
+def resolve_session() -> str:
+    openclaw = os.environ.get("OPENCLAW_SESSION")
+    if openclaw:
+        return openclaw
+    identity_file = Path.home() / ".gstack" / "session-identity"
+    if identity_file.exists():
+        name = identity_file.read_text().strip()
+        if name:
+            return name
+    import socket
+    return f"{socket.gethostname()}-{os.getppid()}"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--skill", required=True)
+    ap.add_argument("--pattern", required=True)
+    ap.add_argument("--evidence", required=True)
+    ap.add_argument("--fix", required=True)
+    ap.add_argument("--severity", choices=["P0", "P1", "P2", "P3"], required=True)
+    ap.add_argument("--scope", required=True,
+                    help="generic | <your-project> | <project-slug>")
+    ap.add_argument("--tags", default="", help="comma-separated")
+    ap.add_argument("--user-quote", default=None)
+    ap.add_argument("--auto", action="store_true",
+                    help="auto_captured=true; default is false")
+    ap.add_argument("--related", default="", help="comma-separated lesson ids")
+    args = ap.parse_args()
+
+    lid = lesson_id(args.skill, args.pattern)
+    slug = resolve_slug()
+    log_dir = Path(os.environ.get("GSTACK_HOME", Path.home() / ".gstack")) / "projects" / slug
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "learnings.jsonl"
+    log_file.touch()
+
+    # Check for existing entry with same id — if present, increment evidence_count
+    existing = []
+    found_idx = None
+    if log_file.stat().st_size > 0:
+        with log_file.open("r") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    existing.append(line)  # preserve malformed for quarantine later
+                    continue
+                if row.get("id") == lid:
+                    found_idx = i
+                    row["evidence_count"] = int(row.get("evidence_count", 1)) + 1
+                    # Track which sessions have reported
+                    sessions = set(row.get("sessions", []))
+                    sessions.add(resolve_session())
+                    row["sessions"] = sorted(sessions)
+                    existing.append(json.dumps(row, separators=(",", ":")))
+                else:
+                    existing.append(json.dumps(row, separators=(",", ":")))
+
+    if found_idx is not None:
+        # Rewrite the file with the incremented entry
+        with log_file.open("w") as f:
+            f.write("\n".join(existing) + "\n")
+        print(f"INCREMENTED: {lid} (evidence_count++)")
+        return
+
+    # Severity → confidence mapping (gstack reader expects 1-10 scale).
+    # P0=9, P1=7, P2=5, P3=3 — matches the severity ladder's relative weight.
+    sev_to_conf = {"P0": 9, "P1": 7, "P2": 5, "P3": 3}
+
+    # New entry.
+    # Dual-schema: native session-lessons fields (id/skill/pattern/...) AND
+    # gstack-reader-compatible aliases (key/type/confidence/source) so the
+    # existing gstack-learnings-search binary can read this file without
+    # adaptation. Either reader gets what it expects.
+    entry = {
+        # Gstack-reader aliases (REQUIRED for gstack-learnings-search):
+        "key": lid,
+        "type": args.skill,
+        "confidence": sev_to_conf.get(args.severity, 5),
+        "source": "observed" if args.auto else "manual",
+        # Native session-lessons fields:
+        "id": lid,
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "session": resolve_session(),
+        "sessions": [resolve_session()],
+        "skill": args.skill,
+        "pattern": args.pattern,
+        "evidence": args.evidence,
+        "fix": args.fix,
+        "severity": args.severity,
+        "scope": args.scope,
+        "tags": [t.strip() for t in args.tags.split(",") if t.strip()],
+        "user_quote": args.user_quote,
+        "auto_captured": args.auto,
+        "related_ids": [r.strip() for r in args.related.split(",") if r.strip()],
+        "evidence_count": 1,
+    }
+    with log_file.open("a") as f:
+        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    print(f"CAPTURED: {lid}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""One-shot: add gstack-reader aliases (key, type, confidence, source) to
+existing learnings.jsonl entries that only have native session-lessons fields.
+
+Idempotent — safe to re-run. Reads each entry, adds missing aliases, writes back.
+Never deletes rows; preserves malformed lines untouched.
+"""
+import json
+from pathlib import Path
+
+SEV_TO_CONF = {"P0": 9, "P1": 7, "P2": 5, "P3": 3}
+
+projects = Path.home() / ".gstack" / "projects"
+if not projects.exists():
+    print("no ~/.gstack/projects/")
+    exit(0)
+
+for slug_dir in projects.iterdir():
+    log = slug_dir / "learnings.jsonl"
+    if not log.exists():
+        continue
+    updated = 0
+    rows = []
+    for line in log.open():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            rows.append(line)
+            continue
+        changed = False
+        if "key" not in r and "id" in r:
+            r["key"] = r["id"]
+            changed = True
+        if "type" not in r and "skill" in r:
+            r["type"] = r["skill"]
+            changed = True
+        if "confidence" not in r:
+            r["confidence"] = SEV_TO_CONF.get(r.get("severity", "P2"), 5)
+            changed = True
+        if "source" not in r:
+            r["source"] = "observed" if r.get("auto_captured") else "manual"
+            changed = True
+        if changed:
+            updated += 1
+        rows.append(json.dumps(r, separators=(",", ":")))
+    log.write_text("\n".join(rows) + "\n")
+    print(f"{slug_dir.name}: updated {updated} rows")

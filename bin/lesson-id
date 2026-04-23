@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Compute a deterministic lesson ID from skill + pattern.
+
+Usage: lesson-id <skill> <pattern>
+Output: sha256-<24-hex>
+"""
+import hashlib, re, sys
+
+
+def lesson_id(skill: str, pattern: str) -> str:
+    normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", pattern.lower())).strip()
+    h = hashlib.sha256(f"{skill}\n{normalized}".encode()).hexdigest()
+    return f"sha256-{h[:24]}"
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("usage: lesson-id <skill> <pattern>", file=sys.stderr)
+        sys.exit(2)
+    print(lesson_id(sys.argv[1], sys.argv[2]))

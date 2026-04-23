@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Weekly aggregator — dedup + hoist-proposal generator.
+
+Walks every learnings.jsonl under ~/.gstack/projects/*/, groups entries by
+lesson id (already deduped per-file by capture-lesson), computes cross-slug
+evidence counts, and emits hoist proposals for patterns that pass threshold:
+
+  - evidence_count_total >= 3 (3+ unique sessions reporting), OR
+  - severity == "P0" AND evidence_count_total >= 2
+
+Output:
+  - Summary to stdout: top patterns by evidence, scope breakdown, hoist candidates
+  - Draft markdown at ~/.claude/skills/session-lessons/proposed/hoists-YYYY-MM-DD.md
+    (only if candidates exist; skipped otherwise)
+
+Usage:
+  aggregator                  # write proposal draft + print summary
+  aggregator --dry-run        # print summary only, no file writes
+  aggregator --scope generic  # filter to generic-only (for public repo prep)
+  aggregator --since 30d      # only consider entries from last N days
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+HOME = Path.home()
+PROJECTS_ROOT = HOME / ".gstack" / "projects"
+PROPOSED_DIR = HOME / ".claude" / "skills" / "session-lessons" / "proposed"
+INVARIANTS_FILE = HOME / ".claude" / "skills" / "session-lessons" / "INVARIANTS.md"
+
+
+def walk_jsonl() -> list:
+    """Yield every lesson across every project slug."""
+    entries = []
+    if not PROJECTS_ROOT.exists():
+        return entries
+    for slug_dir in PROJECTS_ROOT.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        log = slug_dir / "learnings.jsonl"
+        if not log.exists():
+            continue
+        with log.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    row["_slug"] = slug_dir.name
+                    entries.append(row)
+                except json.JSONDecodeError:
+                    continue
+    return entries
+
+
+def parse_since(s: str) -> dt.datetime:
+    """Parse '30d', '7d', '12h', '1w' into a cutoff datetime."""
+    if not s:
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    unit = s[-1]
+    try:
+        n = int(s[:-1])
+    except ValueError:
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    if unit == "h":
+        return now - dt.timedelta(hours=n)
+    if unit == "d":
+        return now - dt.timedelta(days=n)
+    if unit == "w":
+        return now - dt.timedelta(weeks=n)
+    return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def parse_ts(ts: str) -> dt.datetime:
+    try:
+        return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def already_hoisted(pattern: str) -> bool:
+    """Check if INVARIANTS.md already contains text similar to this pattern."""
+    if not INVARIANTS_FILE.exists():
+        return False
+    text = INVARIANTS_FILE.read_text().lower()
+    # Heuristic: first 50 chars of pattern should appear somewhere
+    key = pattern.lower()[:50].strip()
+    return key in text if key else False
+
+
+def group_by_id(entries: list) -> dict:
+    """Group entries by lesson id. Returns {id: [entries-in-cross-slug-order]}."""
+    groups = defaultdict(list)
+    for e in entries:
+        groups[e.get("id", "unknown")].append(e)
+    return groups
+
+
+def aggregate(entries: list) -> dict:
+    """For each unique id, compute cross-slug evidence + session set."""
+    groups = group_by_id(entries)
+    out = {}
+    for lid, rows in groups.items():
+        # Use the first row as the canonical record (same id means same pattern)
+        base = rows[0]
+        sessions = set()
+        total_evidence = 0
+        slugs = set()
+        for r in rows:
+            total_evidence += int(r.get("evidence_count", 1))
+            # capture-lesson writes sessions[] array; fall back to single session field
+            for s in r.get("sessions", []) or [r.get("session", "")]:
+                if s:
+                    sessions.add(s)
+            slugs.add(r.get("_slug", "?"))
+        out[lid] = {
+            "id": lid,
+            "skill": base.get("skill", "?"),
+            "pattern": base.get("pattern", "?"),
+            "evidence": base.get("evidence", "?"),
+            "fix": base.get("fix", "?"),
+            "severity": base.get("severity", "P3"),
+            "scope": base.get("scope", "generic"),
+            "tags": base.get("tags", []),
+            "evidence_count_total": total_evidence,
+            "unique_sessions": sorted(sessions),
+            "unique_session_count": len(sessions),
+            "slugs": sorted(slugs),
+            "latest_ts": max((parse_ts(r.get("ts", "")) for r in rows), default=dt.datetime.min.replace(tzinfo=dt.timezone.utc)),
+            "earliest_ts": min((parse_ts(r.get("ts", "")) for r in rows), default=dt.datetime.min.replace(tzinfo=dt.timezone.utc)),
+        }
+    return out
+
+
+def passes_hoist_threshold(agg: dict) -> bool:
+    n = agg["unique_session_count"]
+    sev = agg["severity"]
+    return n >= 3 or (sev == "P0" and n >= 2)
+
+
+def format_proposal(candidates: list, today: str) -> str:
+    lines = [
+        f"# Hoist proposals · {today}",
+        "",
+        "Generated by `aggregator`. Each section below is a pattern that has",
+        "passed the hoist threshold (≥3 unique sessions, or ≥2 for P0 severity)",
+        "and is ready for promotion to the owning skill's `Invariants` section",
+        "+ cross-referenced in `INVARIANTS.md`.",
+        "",
+        "**Review process:**",
+        "1. Read each candidate below",
+        "2. Decide: approve → hoist to INVARIANTS.md + skill's SKILL.md ; reject → note rationale below",
+        "3. Rejections themselves become lessons (capture via /post-mortem with `skill: post-mortem`)",
+        "",
+        f"**Total candidates:** {len(candidates)}",
+        "",
+        "---",
+        "",
+    ]
+    for i, c in enumerate(candidates, 1):
+        lines.extend([
+            f"## Candidate {i} · `{c['skill']}` · {c['severity']} · scope:{c['scope']}",
+            "",
+            f"**Pattern:** {c['pattern']}",
+            "",
+            f"**Evidence count:** {c['evidence_count_total']} total / {c['unique_session_count']} unique sessions",
+            f"**First captured:** {c['earliest_ts'].isoformat() if c['earliest_ts'] != dt.datetime.min.replace(tzinfo=dt.timezone.utc) else '?'}",
+            f"**Last captured:** {c['latest_ts'].isoformat() if c['latest_ts'] != dt.datetime.min.replace(tzinfo=dt.timezone.utc) else '?'}",
+            f"**Tags:** {', '.join(c['tags']) if c['tags'] else '(none)'}",
+            f"**Slugs:** {', '.join(c['slugs'])}",
+            "",
+            f"**Contributing sessions:** {', '.join(c['unique_sessions'])}",
+            "",
+            "**Evidence quote (from first entry):**",
+            "```",
+            c["evidence"][:500],
+            "```",
+            "",
+            "**Proposed fix (from first entry):**",
+            "```",
+            c["fix"][:500],
+            "```",
+            "",
+            f"**Already in INVARIANTS.md?** {'YES · may be duplicate' if already_hoisted(c['pattern']) else 'no'}",
+            "",
+            "**Proposed invariant text (edit before hoisting):**",
+            "",
+            f"> {c['pattern']}",
+            ">",
+            f"> **Ownership:** `/{c['skill']}`",
+            ">",
+            f"> **Why:** {c['evidence'][:200]}",
+            ">",
+            f"> **Fix:** {c['fix'][:200]}",
+            "",
+            "**Lee's call:**",
+            "- [ ] APPROVE → edit INVARIANTS.md + owning SKILL.md's Invariants section",
+            "- [ ] REJECT → rationale: _______",
+            "- [ ] DEFER → re-evaluate next week",
+            "",
+            "---",
+            "",
+        ])
+    return "\n".join(lines)
+
+
+def format_summary(all_aggs: dict, candidates: list) -> str:
+    by_skill = defaultdict(int)
+    by_scope = defaultdict(int)
+    by_severity = defaultdict(int)
+    for a in all_aggs.values():
+        by_skill[a["skill"]] += 1
+        by_scope[a["scope"]] += 1
+        by_severity[a["severity"]] += 1
+
+    top_patterns = sorted(
+        all_aggs.values(),
+        key=lambda a: (a["unique_session_count"], a["evidence_count_total"]),
+        reverse=True,
+    )[:10]
+
+    lines = [
+        "=== session-lessons aggregator · summary ===",
+        f"Total unique patterns: {len(all_aggs)}",
+        f"Hoist candidates (pass threshold): {len(candidates)}",
+        "",
+        "By skill:",
+    ]
+    for k, v in sorted(by_skill.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {k:<30} {v}")
+    lines.append("")
+    lines.append("By scope:")
+    for k, v in sorted(by_scope.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {k:<30} {v}")
+    lines.append("")
+    lines.append("By severity:")
+    for k, v in sorted(by_severity.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {k:<30} {v}")
+    lines.append("")
+    lines.append("Top 10 patterns (by unique-session evidence):")
+    for a in top_patterns:
+        lines.append(
+            f"  [{a['severity']}] {a['unique_session_count']}s · {a['evidence_count_total']}e · "
+            f"{a['skill']:<22} · {a['pattern'][:80]}"
+        )
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--scope", default=None, help="generic | <your-project> | <slug>")
+    ap.add_argument("--since", default=None, help="30d | 7d | 12h | 1w")
+    args = ap.parse_args()
+
+    entries = walk_jsonl()
+    if args.scope:
+        entries = [e for e in entries if e.get("scope") == args.scope]
+    cutoff = parse_since(args.since) if args.since else None
+    if cutoff:
+        entries = [e for e in entries if parse_ts(e.get("ts", "")) >= cutoff]
+
+    if not entries:
+        print("No lessons found under ~/.gstack/projects/*/learnings.jsonl")
+        print("Run `bin/seed-from-memory` first to migrate the memory/feedback layer.")
+        sys.exit(0)
+
+    all_aggs = aggregate(entries)
+    candidates = [a for a in all_aggs.values() if passes_hoist_threshold(a)]
+    # Sort candidates: P0 first, then by unique-session count, then by evidence
+    candidates.sort(key=lambda a: (
+        {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(a["severity"], 4),
+        -a["unique_session_count"],
+        -a["evidence_count_total"],
+    ))
+
+    print(format_summary(all_aggs, candidates))
+
+    if candidates and not args.dry_run:
+        PROPOSED_DIR.mkdir(parents=True, exist_ok=True)
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        out_file = PROPOSED_DIR / f"hoists-{today}.md"
+        out_file.write_text(format_proposal(candidates, today))
+        print()
+        print(f"✓ Proposal draft written: {out_file}")
+        print(f"  {len(candidates)} candidate(s) awaiting Lee's review.")
+    elif not candidates:
+        print()
+        print("No candidates passed the hoist threshold yet.")
+        print("Thresholds: evidence_count_total >= 3 unique sessions OR (P0 AND >= 2).")
+    elif args.dry_run:
+        print()
+        print(f"[DRY] Would write {len(candidates)} candidate(s) to proposed/hoists-*.md")
+
+
+if __name__ == "__main__":
+    main()

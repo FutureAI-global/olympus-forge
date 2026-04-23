@@ -39,8 +39,11 @@ Each skill encodes one or more of these failure shapes as a pre-flight / post-fl
 ## Install
 
 ```bash
-# Clone to ~/.claude/skills/olympus-forge/
-git clone https://github.com/FutureAI-global/olympus-forge.git ~/.claude/skills/olympus-forge
+# Clone to the Olympus-branded root, then symlink into Claude Code's skill-discovery path
+mkdir -p ~/.olympus
+git clone https://github.com/FutureAI-global/olympus-forge.git ~/.olympus/forge
+mkdir -p ~/.claude/skills
+ln -s ~/.olympus/forge ~/.claude/skills/olympus-forge
 
 # Add routing rules to your CLAUDE.md (append this block):
 cat >> ~/.claude/CLAUDE.md <<'EOF'
@@ -55,7 +58,7 @@ cat >> ~/.claude/CLAUDE.md <<'EOF'
 - Before a PR merges → `/two-claude-review`
 - First action when joining an ecosystem → `/session-lessons-bootstrap`
 
-Full spec: `~/.claude/skills/olympus-forge/README.md`
+Install location: `~/.olympus/forge/` (symlinked into `~/.claude/skills/olympus-forge/` so Claude Code auto-discovers the skills).
 EOF
 ```
 
@@ -64,7 +67,7 @@ EOF
 Write a lesson (usually invoked by `/post-mortem` — but available standalone):
 
 ```bash
-~/.claude/skills/olympus-forge/bin/capture-lesson \
+~/.olympus/forge/bin/capture-lesson \
   --skill verify-before-claim \
   --pattern "claimed 'tests pass' with tests authored but not run" \
   --evidence "PR #<N> shipped; 2 runtime bugs caught in the first e2e run" \
@@ -77,13 +80,13 @@ Write a lesson (usually invoked by `/post-mortem` — but available standalone):
 Read the shared pool:
 
 ```bash
-~/.claude/skills/olympus-forge/bin/aggregator --dry-run
+~/.olympus/forge/bin/aggregator --dry-run
 ```
 
 Generate weekly hoist proposals:
 
 ```bash
-~/.claude/skills/olympus-forge/bin/aggregator
+~/.olympus/forge/bin/aggregator
 # → writes proposed/hoists-YYYY-MM-DD.md with ≥3-session patterns
 ```
 

@@ -103,12 +103,12 @@ End-to-end smoke after wire merges:
 
 Two-Claude-Review (the broader review pattern) becomes tractable when each PR has a single concern. A 1,000-LOC PR touching a 5K central file with new contracts is hard to review well — the reviewer has to hold both contract-correctness and integration-correctness in their head. Splitting frees each PR to be reviewed against its own bar.
 
-In production we shipped 8 PRs in one session using this pattern (bki-i04 plugin loader: backbone + wire = 2 PRs · bki-i05 script runner: parser + runner + adapter + cli-flag = 4 PRs · bundle-test-suite + others). All 8 merged with zero rollbacks; the central TUI file (5,376 LOC) saw 4 separate small additive edits over 6 hours instead of 1 large concurrent edit.
+In one observed feature sprint, 8 PRs shipped against a >5,000-LOC central TUI file using this pattern (a plugin-loader feature split as backbone + wire = 2 PRs; a script-runner feature split as parser + runner + adapter + cli-flag = 4 PRs; plus 2 standalone PRs). All 8 merged with zero rollbacks; the central file saw 4 separate small additive edits across the session instead of 1 large concurrent edit.
 
 ## Seed lessons
 
 - **id**: `pr-velocity-backbone-wire-split-prevents-conflicts`
   **scope**: generic
   **pattern**: when a feature touches a 5K+ LOC central file, split into backbone (new files only, with tests) + wire (small additive central-file edits) PRs. Reduces conflict surface for sibling sessions.
-  **evidence**: 8 PRs shipped in one session against a 5,376-LOC central TUI file; 4 separate small additive edits across 6 hours; zero rollbacks; sibling sessions' parallel PRs rebased cleanly.
+  **evidence**: an observed sprint shipped 8 PRs against a >5,000-LOC central TUI file using this pattern. 4 separate small additive edits across one work session; zero rollbacks; sibling sessions' parallel PRs rebased cleanly.
   **fix**: any feature touching a >2K-LOC file that 2+ sessions are likely editing should ship as backbone+wire PR pair.

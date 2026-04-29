@@ -4,9 +4,9 @@ namespace: dependency-choice
 version: 0.1.0
 description: |
   When generating a PDF that mirrors an existing TEXT artifact
-  (repair order, diagnostic report, audit log, monospace receipt),
-  use `pdf-lib` + the bundled `StandardFonts.Courier` to render
-  page-by-page. Skips Puppeteer / headless Chromium entirely
+  (audit log, transaction receipt, structured report, monospace
+  output), use `pdf-lib` + the bundled `StandardFonts.Courier` to
+  render page-by-page. Skips Puppeteer / headless Chromium entirely
   (~300MB of dep weight) and keeps the PDF column-aligned exactly
   like the source text. Adopt Puppeteer only when the source is
   genuinely HTML-styled and column alignment via mono can't carry.
@@ -21,7 +21,7 @@ allowed-tools:
 
 ## Why this exists
 
-Default reach for "I need a PDF" is Puppeteer because it renders HTML the way browsers do. But Puppeteer pulls ~300MB of bundled Chromium, plus a bunch of native deps, plus DevOps complexity (sandbox flags, `--no-sandbox` debate, CI font availability). For an artifact that's already plain monospace text — repair orders, audit reports, diagnostic exports — that's three orders of magnitude more dep weight than the job needs.
+Default reach for "I need a PDF" is Puppeteer because it renders HTML the way browsers do. But Puppeteer pulls ~300MB of bundled Chromium, plus a bunch of native deps, plus DevOps complexity (sandbox flags, `--no-sandbox` debate, CI font availability). For an artifact that's already plain monospace text — audit reports, transaction logs, system-status snapshots — that's three orders of magnitude more dep weight than the job needs.
 
 `pdf-lib` is pure JS, ~5MB installed, zero native deps. It bundles 14 standard fonts (Helvetica, Times, Courier, Symbol, ZapfDingbats) that don't need shipping. For a Letter-sized monospace PDF that mirrors a `.txt` artifact verbatim, `pdf-lib` + `StandardFonts.Courier` does the job.
 
@@ -193,6 +193,6 @@ function drawPage(
 
 - **id**: `dep-choice-pdf-lib-saves-300mb`
   **scope**: generic
-  **pattern**: text-mirroring PDFs (repair orders, audit logs, diagnostic reports) use pdf-lib + StandardFonts.Courier; saves ~300MB of bundled Chromium vs Puppeteer.
+  **pattern**: text-mirroring PDFs (audit logs, transaction receipts, structured reports) use pdf-lib + StandardFonts.Courier; saves ~300MB of bundled Chromium vs Puppeteer.
   **evidence**: One backend bundle had pdf-lib already installed (~5MB) for other purposes; adding a "PDF export" feature reused it instead of pulling Puppeteer.
   **fix**: when implementing PDF export of an existing TEXT artifact, reach for pdf-lib + Courier first. Only adopt Puppeteer when the source is genuinely HTML-styled and column-alignment via mono won't carry.

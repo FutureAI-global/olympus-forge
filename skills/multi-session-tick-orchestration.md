@@ -3,73 +3,154 @@ name: multi-session-tick-orchestration
 namespace: session-lessons
 version: 0.1.0
 description: |
-  N-session autonomous coordination loop. Encodes the 3-iteration cascade
-  (idle-tick foundation, dedupe-pagination fix, 3-state tick) that takes a
-  naive multi-session coord loop from "30-min false idles + duplicate
-  shipments" to deterministic 60s pickup. Fire when designing or debugging
-  any cron/loop that polls a shared bus and dispatches work to N peers.
+  Pattern for N coordinated autonomous sessions each running their own
+  60-second polling tick against a shared coord-PR bus. Encodes the three
+  iterations the loop needed before it stopped misfiring: per-session idle
+  heartbeat with last-seen cursor, slurped pagination for arithmetic on
+  multi-page responses, and a 3-state tick (idle, in-flight, long-running)
+  that prevents re-assignment of work already in progress.
 allowed-tools:
   - Bash
-provenance: forged 2026-04-29 from a 3-PR cascade in the Olympus multi-session ecosystem (PRs #1900 + #1904 + #1907) where each iteration fixed a specific class of misfire that the naive shape didn't anticipate. The third iteration was needed because long-running sessions kept getting their work re-assigned mid-flight.
+  - Read
+  - Write
+provenance: forged 2026-04-29 from a 3-PR cascade in which a multi-session autonomous coordination loop misfired with false-idle reports, dropped dispatches, and duplicate ships before the per-session tick was hardened.
 ---
 
 # multi-session-tick-orchestration · N-session autonomous loop, three lessons
 
-## What this is
+## Why this exists
 
-A pattern for N coordinated session-Claudes (or N agents of any kind) each running their own 60-second autonomous tick that polls a shared coord-PR thread, posts an `idle` heartbeat when no in-flight work, and gets routed work by a central factory tick when the backlog has matching items.
+A naive "every session posts idle when it has no in-flight PRs" loop looks correct on paper and fails three different ways in practice. Each failure mode wastes a sprint until it gets caught: false-idle reports trigger duplicate assignments, freeform mentions silently bypass pattern matchers, and long-running work gets re-assigned to siblings while the original session is still shipping.
 
-This skill encodes the three iterations the pattern needed before it stopped misfiring.
+This skill encodes the three iterations the pattern needed: the foundation tick with state-cursor, the pagination-arithmetic fix, and the 3-state tick with a `long-running` band that keeps the factory from stealing in-progress work.
 
-## The naive shape (what doesn't work)
+The cost of getting this wrong is duplicate PRs, conflicting branches, and wall-clock minutes burned on "did anyone get this assignment?" debugging. The cost of getting it right is one weekend of skill-encoding plus 60 seconds of per-session install.
+
+## Preamble (run first)
 
 ```bash
-# every session-X cron, every 60s
-if [[ $(in_flight_pr_count) -eq 0 ]]; then
-  gh pr comment $COORD_PR --body "[session-X] idle"
+WORKTREES=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree/ {print $2}')
+
+if [ -x ~/.claude/skills/gstack/bin/gstack-learnings-search ]; then
+  ~/.claude/skills/gstack/bin/gstack-learnings-search --tag tick-orchestration --limit 3 2>/dev/null || true
 fi
 ```
 
-Three bugs the naive shape ships with:
+## Trigger conditions
 
-**Bug 1 (pagination):** `gh pr list --paginate` emits one JSON array per page. `jq '. | length'` against a multi-page response gives the LAST page's length, not the total. Sessions with 100+ open PRs across pages report `idle` falsely.
+1. About to design or operate an N-session autonomous coordination loop on a shared bus
+2. About to write a per-session polling script that posts heartbeat plus reads dispatches
+3. About to count open PRs across multiple pages of `gh pr list --paginate` output
+4. A session has reported `idle` while actually shipping a long-running PR
+5. A session has been re-assigned a task it already accepted within the last assignment window
+6. Considering moving the polling loop to system cron versus an in-shell sleep loop
 
-**Bug 2 (lookback window):** A fixed `ASSIGNMENT_WINDOW_SECONDS=300` (5min) is too narrow. A session picking up work at T0 with execution time > 5min is treated as `idle` again at T+5:30, gets re-assigned the same task, ships duplicate PRs.
+Voice triggers: "set up the auto-tick", "sessions keep double-claiming", "false idle", "the factory re-dispatched".
 
-**Bug 3 (envelope mismatch):** Freeform `@session-x` mentions don't match camel-case `@SessionX` autonomous-tick patterns. Dispatches go invisible. (See `dispatch-format-pickup-verification`.)
+## Workflow
 
-## The fix (3-PR cascade)
+### Phase 1 · Per-session tick foundation
 
-### PR #1 · session-idle-tick.sh foundation
+```bash
+# Each session installs ~/.claude/scripts/session-tick.sh with a state file
+STATE_FILE="$HOME/.cache/<coord-cache-dir>/session-${SESSION_ID}-last-comment.id"
+mkdir -p "$(dirname "$STATE_FILE")"
 
-- Each session installs its own `~/.claude/scripts/session-tick.sh` with a state file at `~/.cache/<ecosystem>/session-X-last-comment.id`
-- 60s loop: check open-PR count for self → post `idle` if zero → read coord-PR comments since last seen → execute any matching assignment
-- Bash sleep-loop chosen over cron / launchd / Task Scheduler so the loop stays in the user's running shell (lower latency, easier to kill, transcript visible in tail)
+while true; do
+  IN_FLIGHT=$(gh pr list --author "@me" --search 'is:open label:active' --json number | jq 'length')
+  if [ "$IN_FLIGHT" -eq 0 ]; then
+    # heartbeat (with dedupe, see Phase 4)
+    gh pr comment "$COORD_PR" --body "[session-${SESSION_ID}] idle, no pending work · auto-tick @ $(date -u +%FT%TZ)"
+  fi
 
-### PR #2 · dedupe-pagination fix
+  # Read new comments since cursor and execute matching assignments
+  LAST=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
+  # ... process comments with id > LAST, then update STATE_FILE
+  sleep 60
+done
+```
 
-- Replace `gh pr list --paginate ... | jq '. | length'` with `gh pr list --paginate ... | jq -s 'add | length'`
-- The `-s` (slurp) merges all pages into one array first
-- Lesson generalizes: ANY arithmetic on `--paginate` output needs `-s`
+Bash chosen over cron / launchd / Task Scheduler because the loop stays in the user's running shell. Lower latency, easier to kill, transactions visible in tail.
 
-### PR #3 · 3-state tick
+### Phase 2 · Slurp before counting paginated output
 
-- Replace boolean `idle / in-flight` with `idle / in-flight / long-running`
-- `long-running` = open PR with branch checked out >30min, no new commits >10min, no `idle` post yet
-- Long-running sessions skip the `idle` post (so factory doesn't re-assign their current work to a sibling)
-- New env: `LONG_RUNNING_THRESHOLD_SECONDS=1800`, `STALE_COMMIT_THRESHOLD_SECONDS=600`
+```bash
+# WRONG: returns last page's length only
+COUNT=$(gh pr list --paginate --json number | jq '. | length')
 
-## Anti-patterns (avoid these)
+# RIGHT: -s slurps all pages into one array first
+COUNT=$(gh pr list --paginate --json number | jq -s 'add | length')
+```
 
-- **Cron at sub-minute intervals** — system cron min granularity is 1 min everywhere (Linux/Mac/Windows). Bash sleep-loop is simpler and more responsive.
-- **Polling every comment-fetch with no since-cursor** — burns API quota; coord PRs balloon to 600+ comments. Always use a `since-comment-id` cursor.
-- **Posting `idle` every tick regardless of staleness** — generates comment spam. Dedupe: don't repost `idle` if last comment from this session is already an `idle` < 5 min old.
-- **Treating coord PR as authoritative for in-flight state** — it's a hint, not a contract. Always cross-check with `gh pr list --search "label:session-X"` before assigning.
-- **One global `ASSIGNMENT_WINDOW` for all session types** — coord-fast sessions (merger doing PR merges) need 1-2min; coord-slow (build session shipping bundles) needs 30-60min. Per-session config.
-- **Trusting the receiver to handle a freeform dispatch** — see `dispatch-format-pickup-verification`. Receivers' tick patterns are strict; envelopes must match.
+Any arithmetic on `--paginate` output requires `jq -s`. Without it, sessions with over 100 open PRs across pages report false-idle and get re-assigned in-flight work.
 
-## Cross-reference
+### Phase 3 · Adopt the 3-state tick
 
-- `coord-pr-as-message-bus` — the bus the tick polls
-- `dispatch-format-pickup-verification` — verify dispatches you send actually get picked up by these ticks
-- `stale-assignment-detection` — receiver-side check before executing an assignment
+Replace boolean `idle / in-flight` with `idle / in-flight / long-running`:
+
+| State | Definition | Heartbeat behavior |
+|---|---|---|
+| `idle` | Zero open PRs labeled active | Post `idle` (with dedupe) |
+| `in-flight` | One or more open PRs, last commit under threshold | Skip heartbeat |
+| `long-running` | Open PR with branch checked out > LONG_RUNNING_THRESHOLD_SECONDS, no new commits > STALE_COMMIT_THRESHOLD_SECONDS, no `idle` post yet | Skip heartbeat (factory MUST NOT re-assign) |
+
+Suggested defaults: `LONG_RUNNING_THRESHOLD_SECONDS=1800`, `STALE_COMMIT_THRESHOLD_SECONDS=600`. Tune per session-class: fast sessions doing merges need 1 to 2 minutes, slow sessions shipping bundles need 30 to 60.
+
+### Phase 4 · Dedupe heartbeats
+
+Do not repost `idle` if the most recent comment from this session is already an `idle` younger than 5 minutes. Without dedupe, the bus fills with redundant heartbeats and human readers cannot find dispatches in the noise.
+
+### Phase 5 · Cross-check before assigning
+
+The coord PR's heartbeat stream is a hint, not a contract. Before the factory dispatches a task to a session, cross-check with `gh pr list --author <session> --state open --search 'label:active'`. If anything matches, the session is busy; pick another receiver.
+
+## What NOT to do
+
+- Cron at sub-minute intervals. System cron's minimum granularity is one minute on Linux, macOS, and Windows Task Scheduler (with workarounds). A bash sleep-loop is simpler and more responsive.
+- Polling every comment-fetch with no since-cursor. Burns API quota; a long-lived coord PR has hundreds of comments. Always use a `since-comment-id` cursor.
+- Posting `idle` every tick regardless of staleness. Generates comment spam that buries directed dispatches.
+- Treating the coord PR as authoritative for in-flight state. It is a hint, not ground truth. Always cross-check with `gh pr list` before assigning.
+- One global `ASSIGNMENT_WINDOW_SECONDS` for all session classes. Coord-fast sessions and coord-slow sessions need different windows. Per-session config.
+
+## Seed lessons
+
+### Lesson 1 · `--paginate | jq '. | length'` reports last-page count
+
+A session's tick used `--paginate` piped to `jq '. | length'` to count its own open PRs. The arithmetic returned only the last page's count. Sessions with over 100 open PRs across pages reported false-idle and were re-assigned in-flight work. The fix: `jq -s 'add | length'`. Generalizes to all paginated arithmetic.
+
+### Lesson 2 · narrow assignment window re-dispatches in-progress work
+
+`ASSIGNMENT_WINDOW_SECONDS=300` (5 minute lookback) was too narrow for sessions whose tasks took longer than 5 minutes. A session picking up work at T0 with execution time over 5 minutes was treated as `idle` again at T+5min30s, got re-assigned the same task, shipped duplicate PRs. The fix: 3-state tick with explicit `long-running` band that signals "still working, do not steal."
+
+### Lesson 3 · freeform mentions bypass autonomous pattern matchers
+
+Freeform `@<session-name>` mentions did not match the camel-case or bracketed envelope pattern the autonomous tick was greping for. Dispatches went invisible. The fix: enforce the canonical envelope shape, verify pickup within two to three ticks, repost in canonical format if the receiver keeps posting `idle`.
+
+### Lesson 4 · in-shell loop beats system cron for autonomous sessions
+
+A first-pass design used cron to fire the tick. Cron's minute-granularity, plus the cost of restarting the Claude shell each fire, plus invisible failures when cron's environment differed from the user's shell, made the loop unreliable. The fix: bash sleep-loop in the user's running Claude shell, killable with Ctrl-C, output visible in tail.
+
+### Lesson 5 · heartbeat dedupe is not optional past 5 sessions
+
+With 5 sessions ticking every 60 seconds and no dedupe, the coord PR accumulates 300 idle posts per hour. Human readers cannot find dispatches; autonomous siblings have to walk past each idle to find the next directed message. The fix: do not repost `idle` if the most recent comment from self is already an `idle` younger than 5 minutes.
+
+## Invariants consulted
+
+- `Invariant 1 · Run the check before claiming`. The cross-check step (`gh pr list --author <session>`) is a "run the check" gate before dispatch lands.
+- `Invariant 10 · Completeness trumps brevity (Boil the Lake)`. The 3-state tick costs 30 lines more than the boolean tick and prevents an entire class of duplicate-ship bugs.
+
+## Integration points
+
+- Pairs with `coord-pr-as-message-bus`. The substrate the ticks run on; this skill defines the polling cadence, that one defines the envelope conventions.
+- Pairs with `dispatch-format-pickup-verification`. The sender-side ritual that confirms a dispatch landed; this skill is the receiver-side polling that does the landing.
+- Pairs with `verify-receipts-before-flawless-claim`. After the tick fires a `shipped: PR #<n>` heartbeat, the receipt-verification skill catches false claims before they reach the operator.
+
+## Completeness principle
+
+This skill DOES NOT fire for single-session workflows or for short-lived helper scripts that fire once and exit. It fires the moment a second session is ticking against the same bus.
+
+False-negative cost (skipping the 3-state tick on a real multi-session loop): duplicate PRs, conflicting branches, wall-clock hours debugging "who shipped that?". False-positive cost (running the 3-state tick on a solo workflow): the boolean check and the 3-state check are both O(1) per tick. Default to the 3-state shape.
+
+## Changelog
+
+- v0.1.0 (2026-04-29). Initial skill from session-lessons. Forged from a 3-PR cascade in which a multi-session autonomous coordination loop misfired with false-idle reports, dropped dispatches, and duplicate ships before the per-session tick was hardened.

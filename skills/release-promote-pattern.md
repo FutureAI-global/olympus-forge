@@ -126,7 +126,7 @@ State should be `MERGED`. Main tip should be the new merge commit.
 ## Anti-patterns
 
 - **Force-merging unstable CI**: only do this for promote PRs where CI was already gated on staging. For NEW code, unstable means "verify before merging."
-- **Skipping the title format**: the stable shape (`promote: staging → main · v0.7.4`) is greppable in audit logs + matches what the dashboard generates. Don't drift the format ad-hoc.
+- **Skipping the title format**: the stable shape (`promote: staging → main · v1.2.3`) is greppable in audit logs + matches what the dashboard generates. Don't drift the format ad-hoc.
 - **Bundling unrelated changes into the promote**: a promote PR's diff should be exactly "staging minus main, no extras". If you cherry-pick around, audit becomes harder.
 
 ## Failure modes

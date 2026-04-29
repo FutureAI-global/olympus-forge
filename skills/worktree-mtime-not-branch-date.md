@@ -142,13 +142,13 @@ If the user described a substantial copy-rewrite session (4-7 hours of polish), 
 
 ## Invariants consulted
 
-- `verify-before-claim` — before claiming "worktree is stale," produce evidence (mtime check)
-- `gh-api-push-pr` — the recipe this skill protects from regression
+- `verify-before-claim`. Before claiming "worktree is stale," produce evidence (mtime check)
+- `gh-api-push-pr`. The recipe this skill protects from regression
 
 ## Integration points
 
-- Pairs with `worktree-uncommitted-polish-trap` (dispatcher-side counterpart) — that skill teaches the orchestrator to ANNOUNCE mods with mtime evidence; this skill teaches the executor to CHECK for them
-- Pairs with `hmr-localhost-via-cp` — the upstream pattern that creates the worktree-files-fresher-than-branch state
+- Pairs with `worktree-uncommitted-polish-trap` (dispatcher-side counterpart). That skill teaches the orchestrator to ANNOUNCE mods with mtime evidence; this skill teaches the executor to CHECK for them
+- Pairs with `hmr-localhost-via-cp`. The upstream pattern that creates the worktree-files-fresher-than-branch state
 
 ## Completeness principle
 
@@ -161,4 +161,4 @@ False positives are cheap (a 30-second `ls -la` per file). False negatives are e
 
 ## Changelog
 
-- v0.1.0 (2026-04-29) — initial skill from session-lessons. Forged from a marketing-site migration regression that shipped pre-edit content over post-edit content.
+- v0.1.0 (2026-04-29). Initial skill from session-lessons. Forged from a marketing-site migration regression that shipped pre-edit content over post-edit content.

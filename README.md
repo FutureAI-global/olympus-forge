@@ -58,6 +58,8 @@ cat >> ~/.claude/CLAUDE.md <<'EOF'
 - Before a PR merges → `/two-claude-review`
 - First action when joining an ecosystem → `/session-lessons-bootstrap`
 
+- Debug session waiting on ops session to grep production logs (read-only diagnostics only) -> `/ssm-send-command-c-side`
+
 Install location: `~/.olympus/forge/` (symlinked into `~/.claude/skills/olympus-forge/` so Claude Code auto-discovers the skills).
 EOF
 ```

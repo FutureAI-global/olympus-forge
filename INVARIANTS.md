@@ -164,6 +164,79 @@ Files flagged in CLAUDE.md as `constitution/v1/**`, `conversation-runner.service
 **Enforced by:** `/fresh-state` pre-flight (detects the path) + a coord-PR-comment check.
 
 ---
+---
+
+## Invariant 12 · Bedrock messages-array validation rules (the full set)
+
+Anthropic's Bedrock API enforces FIVE structural rules on every messages-array request. Violating any one fires a 400 with a misleading "tool_use ids were found without tool_result blocks immediately after" — same symptom, different rule. Sanitizers MUST audit ALL five at PR-author time, not "we'll patch the next one when it fires" (cost on a recent launch-blocker incident: 7 verifier-failed runs + 3 PRs that didn't fix the live bug).
+
+**The five rules:**
+
+| # | Rule | Sanitizer that pins it |
+|---|---|---|
+| 1 | **Strict role alternation** — no consecutive same-role messages | any-assistant-merge in the transcript-to-messages path |
+| 2 | **tool_use → tool_result pairing by id** — every assistant tool_use has a matching tool_result_id in the immediately-following user message | forward-orphan sanitizer + boundary final-mile sanitizer |
+| 3 | **tool_result → tool_use existence by id** — every user tool_result_id must match some prior assistant tool_use id | reverse-orphan sanitizer |
+| 4 | **Block-order within assistant: tool_use blocks must be CONSECUTIVE** — no text/non-tool_use block between any two tool_use blocks within one assistant message | text-then-tool_use stable partition in any consecutive-assistant-merge |
+| 5 | **No empty messages** — drop any message whose content array is empty post-sanitize | boundary sanitizer continue-on-empty |
+
+**Ownership:** `/two-claude-review` (PR-author-time audit) + `/observability-audit` (detector for each rule).
+
+**Why all five:** rules 1-3 alone don't guarantee Bedrock acceptance. The block-order rule (#4) was discovered via a structured-logging chain on 2026-05-01: a pairing-only detector said `well-formed` on the same call Bedrock 400'd. Wire-bytes hash matched detector content (eliminates SDK mid-flight mutation). Only the block-order interleave was rejected.
+
+**Pre-merge audit checklist for any sanitizer/merge fix that touches the Bedrock messages-array path:**
+
+- [ ] Add a regression test for EACH of the 5 rules to the relevant `__tests__/` file
+- [ ] Run a live verifier (synthetic-conversation harness against the live API) post-deploy as the acceptance gate — clean smoke (exit 0) or DO NOT MERGE
+- [ ] Update the structural detector at the API send-site to flag any new rule
+
+**Scope:** `bedrock` (Anthropic Bedrock API specific; applies to any project that uses Bedrock with tool-use)
+
+---
+
+## Invariant 13 · Ship observability before another fix attempt
+
+When a debate cycle runs ≥2 rounds across ≥2 sessions on a sanitizer-gap or contract-gap hypothesis without converging on root cause, **pause the fix lane and ship structured logging instead**. Ground-truth observability resolves H-trees in one capture, often eliminating multiple hypotheses simultaneously.
+
+**Ownership:** `/observability-audit`
+
+**Why:** on a recent launch-blocker incident, H1-H4 sanitizer-gap hypotheses were chased across 4 PRs over ~70 min — none was the live bug. Three observability layers (pre-serialize structural detector, post-serialize wire-bytes hash, sanitizer entry/exit logs) took ~25 min to ship and surfaced the actual rule (a stricter-than-detector API contract) in the FIRST verifier capture post-deploy.
+
+**Three layers most useful for any contract-gap debug:**
+
+1. **Pre-serialize structural detector** — privacy-safe shape skeleton (roles, block types, IDs, refs). Privacy contract: NO raw text, NO tool args, NO result bodies.
+2. **Post-serialize wire-bytes hash + byteLength** — proves bytes the API receives match what the detector saw (eliminates mid-flight mutation hypothesis).
+3. **Entry/exit logs at every sanitizer pass** — separates "sanitizer didn't fire" from "sanitizer fired but didn't catch this case".
+
+**Decision tree (with all three layers):**
+
+| Detector | Wire-hash matches | API response | Diagnosis |
+|---|---|---|---|
+| WARN ill-formed | — | 4xx | sanitizer gap (rule X missed in detection logic) |
+| INFO well-formed | matches | 4xx | API stricter than detector (new rule needed) |
+| INFO well-formed | diverges | 4xx | mid-flight mutation (SDK / serializer bug) |
+
+**Scope:** `generic`
+
+---
+
+## Invariant 14 · Source-trace inference is NOT live evidence
+
+A source-trace "best hypothesis" before live (production / log) evidence has a high false-positive rate. Shipping a fix from a source-trace alone risks defensive churn while the real bug is elsewhere.
+
+**Ownership:** `/verify-before-claim`
+
+**Why:** on a recent launch-blocker incident, a source-trace at T+0 identified hypothesis A as the cause; ground-truth log capture at T+45min proved the live failure had a different shape entirely. The source-trace fix landed but didn't fix the live bug; the real root cause was a different rule, fixed in a follow-up PR.
+
+**Two-path rule:**
+
+- (a) **Ship as defensive companion** with explicit scope caveat in PR body — "fixes a real but latent hole; live failure root cause TBD" — preserves honesty + parallel progress
+- (b) **Wait for log evidence** if the source-trace is the only hypothesis — "I have a source-trace hypothesis but no live evidence yet; ship observability first OR wait for grep, your call?"
+
+**Forbidden:** claiming the fix addresses the live failure when the live failure shape might not match the hypothesis.
+
+**Scope:** `generic`
+
 
 ## How to add a new invariant
 
@@ -179,3 +252,4 @@ Files flagged in CLAUDE.md as `constitution/v1/**`, `conversation-runner.service
 ## Changelog
 
 - **a recent incident · v1** — 11 invariants. a specific session authored. Derived from this session's lessons + 21 pre-existing `memory/feedback_*.md` seeds.
+- **a recent incident · v2** — added Invariants 12 (Bedrock 5-rule set), 13 (ship observability after 2 rounds), 14 (source-trace ≠ live evidence). Derived from a launch-blocker chain on 2026-05-01 where H1-H4 sanitizer-gap hypotheses didn't fix the live bug; structured logging surfaced the actual rule (Bedrock block-order strict requirement) in one capture. Hoist threshold satisfied: P0 + 2-session evidence.

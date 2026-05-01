@@ -58,6 +58,9 @@ cat >> ~/.claude/CLAUDE.md <<'EOF'
 - Before a PR merges → `/two-claude-review`
 - First action when joining an ecosystem → `/session-lessons-bootstrap`
 
+- When two sessions diagnose the same bug differently with different proposed fixes -> `/competing-fix-reconciliation-via-dispositive-evidence`
+- Before claiming a bug-fix PR resolved a production failure (merge != deployed != verified) -> `/acceptance-test-after-deploy-not-merge`
+
 Install location: `~/.olympus/forge/` (symlinked into `~/.claude/skills/olympus-forge/` so Claude Code auto-discovers the skills).
 EOF
 ```

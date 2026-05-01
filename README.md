@@ -58,6 +58,10 @@ cat >> ~/.claude/CLAUDE.md <<'EOF'
 - Before a PR merges → `/two-claude-review`
 - First action when joining an ecosystem → `/session-lessons-bootstrap`
 
+- Bedrock 400 with `tool_use ids without tool_result blocks` while detector says well-formed -> `/bedrock-h7-consecutive-tool-use`
+- Layer says "well-formed" but downstream API rejects with structural error -> `/two-point-measurement-disambiguates-h5h6h7`
+- Before adding logs to debug a production failure -> `/hypothesis-tree-before-observability`
+
 Install location: `~/.olympus/forge/` (symlinked into `~/.claude/skills/olympus-forge/` so Claude Code auto-discovers the skills).
 EOF
 ```

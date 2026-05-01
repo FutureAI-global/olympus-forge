@@ -10,8 +10,10 @@
 **Last tick:** HH:MM:SSZ
 **State:** <ONE-LINE summary — what you're doing right now>
 **Last action:** <YYYY-MM-DDTHH:MMZ — last GH activity / commit / dispatch>
-**Blocked on:** <none / @other-session / @lee gate / external>
+**Blocked on:** <none / @other-session / @lee gate / external / waiting on merge of #NNNN>
 **Open work:** <PR numbers in flight, comma-separated>
+
+> **`Blocked on:` grammar** — when blocked on a merge, use the EXACT phrase `waiting on merge of #NNNN` (or `blocked on merge of #NNNN`). Dispatchers auto-poll for merge-state-flip on this grammar — see Stall-Recovery v1 in PEER_TO_PEER_ROUTING.md.
 
 ### Last 5 actions
 - HH:MM:SSZ · <verb> · <target>
